@@ -28,7 +28,14 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/atsw-calcom
+  # NOTE: ghcr.io/<owner>/atsw-calcom already exists as a package first
+  # published from a different repository (atsw-calcom-build), which means
+  # THIS repo's GITHUB_TOKEN has no write access to it regardless of the
+  # `packages: write` permission declared above -- GHCR ties a package's
+  # implicit Actions access to whichever repo first created it. Using the
+  # repo name in the image name keeps this workflow's package cleanly
+  # owned by cal.diy, with no cross-repo linking required.
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build-and-push:
