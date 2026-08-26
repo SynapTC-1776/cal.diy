@@ -1,0 +1,89 @@
+name: Build and Push (ATSW OS)
+
+# ==============================================================================
+# ATSW OS — cal.diy image build pipeline
+#
+# WHY THIS EXISTS: the OVH VPS this image deploys to has 3.7GB RAM. Building
+# this Turborepo/Next.js monorepo directly on that box OOMs reliably —
+# confirmed twice (build.log, build3.log): `@calcom/trpc` died with a Node
+# heap-exhaustion fatal error, `@calcom/web` failed at the Next.js build
+# step. GitHub-hosted runners give 16GB RAM by default, comfortably clearing
+# this build. The VPS must only ever `docker pull` the finished image from
+# GHCR — it must never build this monorepo locally again.
+#
+# TRIGGER: version tags only (v*.*.*), not every push to main. This avoids
+# accidentally shipping a work-in-progress commit to production — a real
+# deploy only happens when someone deliberately cuts a tag.
+# ==============================================================================
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch: {}   # manual trigger, useful for re-running a failed build without re-tagging
+
+permissions:
+  contents: read
+  packages: write   # required to push to ghcr.io
+
+env:
+  REGISTRY: ghcr.io
+  # NOTE: ghcr.io/<owner>/atsw-calcom already exists as a package first
+  # published from a different repository (atsw-calcom-build), which means
+  # THIS repo's GITHUB_TOKEN has no write access to it regardless of the
+  # `packages: write` permission declared above -- GHCR ties a package's
+  # implicit Actions access to whichever repo first created it. Using the
+  # repo name in the image name keeps this workflow's package cleanly
+  # owned by cal.diy, with no cross-repo linking required.
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest   # 16GB RAM, 4 vCPU — vs 3.7GB on the target VPS
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1   # shallow clone; this repo's git history is not needed to build
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}   # GitHub Actions' own token, scoped to this repo/run only — never GHCR_TOKEN
+
+      - name: Derive image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=match,pattern=v(.*),group=1
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Secrets that were previously baked into the image via build ARG/ENV
+          # (CALENDSO_ENCRYPTION_KEY, NEXTAUTH_SECRET — flagged in the ATSW OS
+          # audit as a `SecretsUsedInArgOrEnv` defect) are intentionally NOT
+          # passed here. They are supplied at container *runtime* by
+          # docker-compose.yml on the VPS instead. See Phase 4.
+          build-args: |
+            NEXT_PUBLIC_LICENSE_CONSENT=agree
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image digest
+        run: echo "Pushed ${{ steps.meta.outputs.tags }}"
